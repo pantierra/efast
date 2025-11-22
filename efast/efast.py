@@ -25,6 +25,7 @@ SOFTWARE.
 @author: rmgu, pase
 """
 
+import logging
 import os
 
 import numpy as np
@@ -35,6 +36,8 @@ import scipy.ndimage
 
 from scipy.interpolate import interp1d
 from tqdm import tqdm
+
+logger = logging.getLogger(__name__)
 
 
 def fusion(
@@ -99,11 +102,15 @@ def fusion(
         Time Series over Rangelands. Remote Sensing 16, 1833. https://doi.org/10.3390/rs16111833
     """
 
+    logger.debug(f"Starting fusion for prediction date: {pred_date.date()}")
     hr_suffix = product
 
     # High-resolution images
+    logger.debug(f"Searching for high-resolution images in {hr_dir}")
     hr_paths_c = sorted(hr_dir.glob("*DIST_CLOUD.tif"))
     hr_paths_hr = sorted(hr_dir.glob(f"*{hr_suffix}.tif"))
+    logger.debug(f"Found {len(hr_paths_c)} distance-to-cloud files and {len(hr_paths_hr)} {hr_suffix} files")
+    
     hr_dates = pd.to_datetime(
         [os.path.split(hr_path)[-1].split("_")[date_position] for hr_path in hr_paths_c]
     )
@@ -112,16 +119,20 @@ def fusion(
         [hr_path for _, hr_path in sorted(zip(hr_dates, hr_paths_hr))]
     )
     hr_dates = pd.to_datetime(sorted(hr_dates))
+    logger.debug(f"High-resolution date range: {hr_dates.min().date()} to {hr_dates.max().date()} ({len(hr_dates)} images)")
 
     # Low-resolution images
+    logger.debug(f"Searching for low-resolution images in {lr_dir}")
     lr_paths = sorted(lr_dir.glob("composite*.tif"))
     lr_dates = pd.to_datetime(
         [os.path.split(lr_path)[-1].split("_")[1][:-4] for lr_path in lr_paths]
     )
     lr_paths = np.array([lr_path for _, lr_path in sorted(zip(lr_dates, lr_paths))])
     lr_dates = pd.to_datetime(sorted(lr_dates))
+    logger.debug(f"Low-resolution date range: {lr_dates.min().date()} to {lr_dates.max().date()} ({len(lr_dates)} images)")
 
     # Images used in the averaging process
+    logger.debug(f"Filtering images within ±{max_days} days of prediction date")
     lr_potential_dates = np.array(
         [
             -1.5 * max_days < (lr_date - pred_date).days < 1.5 * max_days
@@ -131,6 +142,10 @@ def fusion(
     hr_potential_dates = np.array(
         [-max_days < (hr_date - pred_date).days < max_days for hr_date in hr_dates]
     )
+    n_lr_selected = np.sum(lr_potential_dates)
+    n_hr_selected = np.sum(hr_potential_dates)
+    logger.debug(f"Selected {n_lr_selected}/{len(lr_dates)} low-resolution images and {n_hr_selected}/{len(hr_dates)} high-resolution images")
+    
     lr_paths = lr_paths[lr_potential_dates]
     hr_paths_c = hr_paths_c[hr_potential_dates]
     hr_paths_hr = hr_paths_hr[hr_potential_dates]
@@ -138,6 +153,7 @@ def fusion(
     # Convert dates to numbers
     t_s3 = np.array((lr_dates[lr_potential_dates] - pred_date).days)
     t_s2 = np.array((hr_dates[hr_potential_dates] - pred_date).days)
+    logger.debug(f"Time offsets: S3 range [{t_s3.min():.1f}, {t_s3.max():.1f}] days, S2 range [{t_s2.min():.1f}, {t_s2.max():.1f}] days")
 
     # Crop extent
     lr_window = None
@@ -153,10 +169,13 @@ def fusion(
 
     # Read low-resolution image
     if len(lr_paths) == 0:
+        logger.warning(f"No low-resolution images found for prediction date {pred_date.date()}, skipping fusion")
         return
+    logger.debug(f"Reading low-resolution image profile from {lr_paths[0].name}")
     with rasterio.open(lr_paths[0]) as src:
         lr_profile = src.profile
         bands = src.count
+    logger.debug(f"Low-resolution image: {lr_profile['width']}x{lr_profile['height']} pixels, {bands} bands")
     if lr_window is not None:
         lr_profile.update(
             {
@@ -168,10 +187,12 @@ def fusion(
             }
         )
 
+    logger.debug(f"Loading {len(lr_paths)} low-resolution images...")
     lr_values = np.zeros((len(t_s3), bands, lr_profile["height"], lr_profile["width"]))
     for i, lr_path in enumerate(lr_paths):
         with rasterio.open(lr_path) as src:
             lr_values[i, :, :, :] = src.read(window=lr_window)
+    logger.debug(f"Loaded low-resolution images: shape {lr_values.shape}")
 
     # Prepare low-resolution rasters
     lr_i = np.nan * np.zeros(
@@ -184,6 +205,7 @@ def fusion(
     )
 
     # Interpolate low-resolution values temporally
+    logger.info(f"Interpolating low-resolution values temporally ({lr_profile['height']} rows)...")
     for row in tqdm(range(lr_profile["height"]), "Low-resolution image interpolation"):
         for col in range(lr_profile["width"]):
             for band in range(lr_values.shape[1]):
@@ -201,6 +223,7 @@ def fusion(
     # --- Section 2.5 from [Senty2024] ---
 
     # Read distance-to-cloud scores for high-resolution images
+    logger.debug(f"Reading distance-to-cloud scores from {len(hr_paths_c)} files...")
     distance_to_cloud = np.zeros((len(t_s2), lr_profile["height"], lr_profile["width"]))
     for i, hr_path_c in enumerate(hr_paths_c):
         with rasterio.open(hr_path_c) as src:
@@ -208,6 +231,7 @@ def fusion(
 
     # Compute the weights of each high-resolution image for every low-resolution pixel, temporal
     # times optical Gaussian (t)
+    logger.debug(f"Computing weights (sigma={sigma}, D={D})...")
     wt_i = np.exp(-((t_s2 / sigma) ** 2))
     # Ramp (distance) - 0 for 1 km away from a cloud, 1 for 10 km
     wo_i = (distance_to_cloud - 1) / D
@@ -223,10 +247,12 @@ def fusion(
     w_i = w_i.reshape((len(t_s2), 1, lr_profile["height"], lr_profile["width"]))
 
     # Select the best quality high-resolution images
+    logger.debug(f"Selecting high-resolution images (minimum_acquisition_importance={minimum_acquisition_importance})...")
     acquisition_importance = np.nansum(w_i, axis=(1, 2, 3)) / np.prod(w_i.shape[1:])
     hr_selected = acquisition_importance > minimum_acquisition_importance / len(t_s2)
     w_is = w_i[hr_selected]
     n_selected = np.sum(hr_selected)
+    logger.info(f"Selected {n_selected}/{len(hr_paths_hr)} high-resolution images for fusion")
 
     # Initialize the mosaic rasters
     hr_m = np.zeros(
@@ -240,6 +266,7 @@ def fusion(
     wu = np.zeros((1, lr_profile["height"] * ratio, lr_profile["width"] * ratio))
 
     # Fill the mosaics
+    logger.info(f"Creating high-resolution mosaic from {n_selected} selected images...")
     for i in tqdm(range(n_selected), "High-resolution mosaic"):
         # Bilinear interpolation of weights
         w_is[i, np.isnan(w_is[i])] = 0
@@ -267,11 +294,12 @@ def fusion(
     # --- Section 2.4 from [Senty2024] ---
 
     # Fusion, eq. (2) from [Senty2024]
+    logger.debug("Performing fusion (upsampling low-resolution prediction and combining with mosaics)...")
     lr_p = upsample_array(lr_p, ratio=ratio)
     fusion = lr_p + hr_m - lr_m
 
     # --- Save outputs ---
-
+    logger.debug("Preparing output file...")
     with rasterio.open(hr_paths_hr[0]) as src:
         profile = src.profile
 
@@ -280,6 +308,7 @@ def fusion(
         fusion_dir,
         f'{product}_{pred_date.strftime("%Y%m%d")}.tif',
     )
+    logger.info(f"Saving fused image to {export_path}")
 
     if lr_window is not None:
         profile.update(
@@ -294,10 +323,13 @@ def fusion(
 
     with rasterio.open(export_path, "w", **profile) as dst:
         dst.write(fusion)
+        logger.debug(f"Written fusion result: {fusion.shape} (bands x height x width)")
         # TODO - change add_overview to save_as_cog
         if add_overview:
+            logger.debug("Building overviews...")
             dst.build_overviews([2, 4, 8, 16], rasterio.enums.Resampling.average)
             dst.update_tags(ns="rio_overview", resampling="average")
+    logger.debug(f"Fusion completed for {pred_date.date()}")
 
 
 def upsample_array(C, fine_shape=None, ratio=15, kron=False, order=1):
