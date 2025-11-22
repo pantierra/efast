@@ -25,6 +25,7 @@ SOFTWARE.
 @author: rmgu, pase
 """
 
+import logging
 import re
 import xml.etree.ElementTree as ET
 
@@ -36,6 +37,8 @@ import scipy as sp
 from shapely.geometry import box
 from shapely.ops import transform
 from tqdm import tqdm
+
+logger = logging.getLogger(__name__)
 
 # Mapping of Sentinel-2 bands names to bands ids
 BANDS_IDS = {
@@ -51,18 +54,33 @@ BANDS_IDS = {
     "B12": "12",
 }
 
+# Mapping of Sentinel-2 band names to STAC asset keys (Element84 naming)
+STAC_BAND_MAPPING = {
+    "B02": "blue",
+    "B03": "green",
+    "B04": "red",
+    "B05": "rededge1",
+    "B06": "rededge2",
+    "B07": "rededge3",
+    "B08": "nir",
+    "B8A": "nir08",
+    "B11": "swir16",
+    "B12": "swir22",
+    "SCL": "scl",
+}
+
 
 def extract_mask_s2_bands(
-    input_dir, output_dir, bands=["B02", "B03", "B04", "B8A"], resolution=20
+    input_dir, output_dir, bands=["B02", "B03", "B04", "B8A"], resolution=20, stac_items=None
 ):
     """
-    Extract specified Sentinel-2 bands from .SAFE file, mask clouds and shadows using the SLC mask
+    Extract specified Sentinel-2 bands from .SAFE file or STAC items, mask clouds and shadows using the SLC mask
     and save to multi-band GeoTIFF file.
 
     Parameters
     ----------
     input_dir : pathlib.Path
-        The directory where the Sentinel-2 .SAFE images are stored.
+        The directory where the Sentinel-2 .SAFE images are stored (used if stac_items is None).
     output_dir: pathlib.Path
         The directory where the Sentinel-2 GeoTIFF images are to be stored.
     bands: list [str], optional
@@ -71,11 +89,140 @@ def extract_mask_s2_bands(
     resolution: int, optional
         Spatial resolution of the bands to be extracted.
         Defaults to 20.
+    stac_items: list, optional
+        List of STAC items to process. If provided, processes COGs from STAC instead of .SAFE files.
 
     Returns
     -------
     None
     """
+    # Process STAC items if provided
+    if stac_items is not None:
+        for item in tqdm(stac_items, desc="Processing STAC items"):
+            # Get COG asset URLs from STAC item
+            # Element84 STAC uses asset keys like "B02", "B03", etc. and "SCL" for cloud mask
+            try:
+                # Find first available band to get profile using STAC band mapping
+                profile = None
+                first_band = bands[0]
+                # Map band name to STAC asset key
+                stac_band_key = STAC_BAND_MAPPING.get(first_band, first_band.lower())
+                
+                # Try STAC mapping first, then fallback to original name variants
+                for key_variant in [stac_band_key, first_band, first_band.upper(), first_band.lower()]:
+                    if key_variant in item.assets:
+                        first_band_url = item.assets[key_variant].href
+                        with rasterio.open(first_band_url) as src:
+                            profile = src.profile.copy()
+                        break
+                
+                if profile is None:
+                    logger.warning(f"Could not find band {first_band} in STAC item {item.id}")
+                    logger.warning(f"Available assets: {list(item.assets.keys())[:15]}")
+                    continue
+                
+                # Read SCL cloud mask - use STAC mapping
+                scl_key = STAC_BAND_MAPPING.get("SCL", "scl")
+                scl_url = None
+                for scl_variant in [scl_key, "SCL", "scl", "scene-classification"]:
+                    if scl_variant in item.assets:
+                        scl_url = item.assets[scl_variant].href
+                        break
+                
+                if scl_url is None:
+                    logger.warning(f"SCL band not found in STAC item {item.id}")
+                    logger.warning(f"Available assets: {list(item.assets.keys())[:15]}")
+                    continue
+                
+                # Read SCL mask and ensure it matches the profile dimensions
+                with rasterio.open(scl_url) as mask_src:
+                    mask_data = mask_src.read(1)
+                    mask_profile = mask_src.profile
+                
+                # If mask has different dimensions, resample it to match the band profile
+                if mask_data.shape != (profile["height"], profile["width"]):
+                    from rasterio.warp import reproject, Resampling
+                    mask_resampled = np.zeros((profile["height"], profile["width"]), dtype=mask_data.dtype)
+                    reproject(
+                        source=mask_data,
+                        destination=mask_resampled,
+                        src_transform=mask_profile["transform"],
+                        src_crs=mask_profile["crs"],
+                        dst_transform=profile["transform"],
+                        dst_crs=profile["crs"],
+                        resampling=Resampling.nearest,
+                    )
+                    mask = mask_resampled
+                else:
+                    mask = mask_data
+                
+                mask = (mask == 0) | (mask == 3) | (mask > 7)
+                
+                # Combine bands and mask
+                s2_image = np.zeros(
+                    (len(bands), profile["height"], profile["width"]), "float32"
+                )
+                
+                for i, band in enumerate(bands):
+                    # Map band name to STAC asset key
+                    stac_band_key = STAC_BAND_MAPPING.get(band, band.lower())
+                    band_url = None
+                    # Try STAC mapping first, then fallback to original name variants
+                    for key_variant in [stac_band_key, band, band.upper(), band.lower()]:
+                        if key_variant in item.assets:
+                            band_url = item.assets[key_variant].href
+                            break
+                    
+                    if band_url is None:
+                        logger.warning(f"Band {band} not found in STAC item {item.id}, skipping")
+                        continue
+                    
+                    with rasterio.open(band_url) as src:
+                        # STAC COGs from Element84 are typically in reflectance (0-1) or DN*10000
+                        # Check if values need scaling
+                        data = src.read(1).astype("float32")
+                        
+                        # Ensure data matches profile dimensions (resample if needed)
+                        if data.shape != (profile["height"], profile["width"]):
+                            from rasterio.warp import reproject, Resampling
+                            data_resampled = np.zeros((profile["height"], profile["width"]), dtype=data.dtype)
+                            reproject(
+                                source=data,
+                                destination=data_resampled,
+                                src_transform=src.transform,
+                                src_crs=src.crs,
+                                dst_transform=profile["transform"],
+                                dst_crs=profile["crs"],
+                                resampling=Resampling.bilinear,
+                            )
+                            data = data_resampled
+                        
+                        if data.max() > 1.0:
+                            # Likely DN values, scale to reflectance
+                            data = data / 10000.0
+                        # Ensure values are in [0, 1] range
+                        data = np.clip(data, 0, 1)
+                        data[mask] = 0
+                        s2_image[i] = data
+                
+                # Save file
+                profile.update(
+                    {"driver": "GTiff", "count": len(bands), "dtype": "float32", "nodata": 0}
+                )
+                # Use STAC item ID for filename
+                out_path = output_dir / f"{item.id}_REFL.tif"
+                with rasterio.open(out_path, "w", **profile) as dst:
+                    dst.write(s2_image)
+                    
+            except Exception as e:
+                logger.error(f"Error processing STAC item {item.id}: {e}")
+                import traceback
+                logger.debug(traceback.format_exc())
+                continue
+        
+        return
+    
+    # Original .SAFE file processing
     for p in input_dir.glob("*.SAFE"):
         band_paths = [
             list(p.glob(f"GRANULE/*/IMG_DATA/R{resolution}m/*{band}*.jp2"))[0]
@@ -200,7 +347,7 @@ def distance_to_clouds(dir_s2, ratio=30, tolerance_percentage=0.05):
         s2_profile.update({"count": 1})
 
         # Save output
-        out_path = re.sub("_[A-Z]*\.tif", "_DIST_CLOUD.tif", str(sen2_path))
+        out_path = re.sub(r"_[A-Z]*\.tif", "_DIST_CLOUD.tif", str(sen2_path))
         with rasterio.open(out_path, "w", **s2_profile) as dst:
             dst.write(distance_to_cloud[np.newaxis])
 

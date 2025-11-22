@@ -25,6 +25,7 @@ SOFTWARE.
 @author: rmgu, pase
 """
 
+import logging
 import os
 import re
 
@@ -43,6 +44,8 @@ from rasterio.vrt import WarpedVRT
 from snap_graph.snap_graph import SnapGraph
 from tqdm import tqdm
 
+logger = logging.getLogger(__name__)
+
 
 def binning_s3(
     download_dir,
@@ -56,13 +59,14 @@ def binning_s3(
     snap_gpt_path="gpt",
     snap_memory="8G",
     snap_parallelization=1,
+    stac_items=None,
 ):
     """
     Create single-band composites of Sentinel-3 data
     Parameters
     ----------
     download_dir : Path
-        folder where the Sentinel-3 files were downloaded
+        folder where the Sentinel-3 files were downloaded (used if stac_items is None)
     binning_dir : Path
         folder where the Sentinel-3 composites will be stored
     s3_bands : list, optional.
@@ -85,11 +89,20 @@ def binning_s3(
         memory to allocate to SNAP (default: '8G')
     snap_parallelization : int
         parallelization of SNAP processing
+    stac_items : list, optional
+        List of STAC items to process. Currently not fully supported - requires .SEN3 format and SNAP binning.
 
     Returns
     -------
     None
     """
+    
+    # Check if STAC items are provided
+    if stac_items is not None:
+        logger.warning("STAC items provided for Sentinel-3, but STAC processing requires .SEN3 format and SNAP binning.")
+        logger.warning("STAC-based Sentinel-3 processing is not yet fully implemented. Falling back to CDSE download.")
+        logger.warning("Please use CDSE data source for Sentinel-3 processing.")
+        return
 
     # sort files by dates
     if s3_bands is None:
@@ -215,7 +228,7 @@ def produce_median_composite(
     sen3_paths = list(dir_s3.glob("S3*.tif"))
     s3_dates = pd.to_datetime(
         [
-            re.match(".*__(\d{8})T.*\.tif", sen3_path.name).group(1)
+            re.match(r".*__(\d{8})T.*\.tif", sen3_path.name).group(1)
             for sen3_path in sen3_paths
         ]
     )

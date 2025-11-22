@@ -193,6 +193,7 @@ def main_wrapper(
     snap_gpt_path="gpt",
     list_sites=False,
     log_level="INFO",
+    data_source="cdse",
 ):
     """
     Main wrapper function to run EFAST for a selected site and season.
@@ -298,6 +299,7 @@ def main_wrapper(
     logger.info(f"Step: {step} days")
     logger.info(f"Ratio: {ratio}")
     logger.info(f"Log level: {log_level}")
+    logger.info(f"Data source: {data_source}")
     logger.info("=" * 70)
     
     # Run EFAST
@@ -316,6 +318,7 @@ def main_wrapper(
             ratio=ratio,
             snap_gpt_path=snap_gpt_path,
             log_level=log_level,
+            data_source=data_source,
         )
         logger.info("=" * 70)
         logger.info("EFAST processing completed successfully!")
@@ -401,6 +404,13 @@ if __name__ == "__main__":
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         help="Set logging level (default: INFO)",
     )
+    parser.add_argument(
+        "--data-source",
+        type=str,
+        default="cdse",
+        choices=["cdse", "stac"],
+        help="Data source: 'cdse' for CDSE download or 'stac' for STAC API (default: cdse)",
+    )
     
     args = parser.parse_args()
     
@@ -422,5 +432,6 @@ if __name__ == "__main__":
         snap_gpt_path=args.snap_gpt_path,
         list_sites=args.list_sites,
         log_level=args.log_level,
+        data_source=args.data_source,
     )
 
