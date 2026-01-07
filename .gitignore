@@ -147,3 +147,5 @@ test_data/S3/calibrated
 test_data/S3/binning
 test_data/S3/blurred
 test_data/S3/raw
+test_data/S3/openeo_test
+*.backup

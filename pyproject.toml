@@ -30,6 +30,13 @@ dependencies = [
 dev = [
     "ruff",
 ]
+notebook = [
+    "notebook",
+    "jupyterlab",
+    "ipywidgets",
+    "folium",
+    "matplotlib",
+]
 
 [tool.setuptools.packages.find]
 include = ["efast"]

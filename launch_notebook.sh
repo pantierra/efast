@@ -1,0 +1,31 @@
+#!/bin/bash
+# Launch script for eFAST Interactive Notebook
+
+echo "🚀 Launching eFAST Interactive Notebook..."
+echo ""
+
+# Check if we're in the efast directory
+if [ ! -f "selected_sites.geojson" ]; then
+    echo "❌ Error: Run this script from the efast directory"
+    exit 1
+fi
+
+# Check for virtual environment
+if [ ! -d ".venv" ]; then
+    echo "⚠️  Virtual environment not found!"
+    exit 1
+fi
+
+# Launch directly with venv jupyter
+if [ -f ".venv/bin/jupyter" ]; then
+    echo "📓 Opening efast_interactive.ipynb..."
+    echo ""
+    echo "Jupyter will open in your browser shortly..."
+    echo "Press Ctrl+C to stop the server when done."
+    echo ""
+    .venv/bin/jupyter notebook efast_interactive.ipynb --ip=127.0.0.1
+else
+    echo "❌ Jupyter not found!"
+    echo "   Install: uv pip install -e '.[notebook]'"
+    exit 1
+fi

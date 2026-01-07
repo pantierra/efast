@@ -38,11 +38,13 @@ import rasterio
 import scipy as sp
 
 from dateutil import rrule
-from rasterio import shutil as rio_shutil
+from rasterio import warp as rio_warp
 from rasterio.enums import Resampling
 from rasterio.vrt import WarpedVRT
 from snap_graph.snap_graph import SnapGraph
 from tqdm import tqdm
+
+from .s3_openeo_download import S3OpenEODownloader
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +62,10 @@ def binning_s3(
     snap_memory="8G",
     snap_parallelization=1,
     stac_items=None,
+    use_openeo=False,
+    geojson_path=None,
+    site_name=None,
+    season_year=None,
 ):
     """
     Create single-band composites of Sentinel-3 data
@@ -91,16 +97,58 @@ def binning_s3(
         parallelization of SNAP processing
     stac_items : list, optional
         List of STAC items to process. Currently not fully supported - requires .SEN3 format and SNAP binning.
+    use_openeo : bool, optional
+        If True, use openEO to download data from CDSE instead of processing local files
+    geojson_path : str, optional
+        Path to GeoJSON file containing site definitions (required if use_openeo=True)
+    site_name : str, optional
+        Name of the site to download data for (required if use_openeo=True)
+    season_year : str, optional
+        Year of the season to download (required if use_openeo=True)
 
     Returns
     -------
     None
     """
-    
+
+    # Check if openEO download is requested
+    if use_openeo:
+        logger.info("Using openEO to download Sentinel-3 data from CDSE")
+        if not all([geojson_path, site_name, season_year]):
+            logger.error(
+                "geojson_path, site_name, and season_year are required for openEO download"
+            )
+            return
+
+        # Initialize and authenticate openEO downloader
+        downloader = S3OpenEODownloader()
+        if not downloader.authenticate():
+            logger.error("Failed to authenticate with CDSE openEO")
+            return
+
+        # Download data directly to the binning directory as NetCDF
+        result = downloader.download_from_geojson_site(
+            geojson_path=str(geojson_path) if geojson_path else "",
+            site_name=str(site_name) if site_name else "",
+            season_year=str(season_year) if season_year else "",
+            output_dir=binning_dir,
+            bands=s3_bands,
+        )
+
+        if result:
+            logger.info(f"Successfully downloaded S3 data via openEO: {result}")
+        else:
+            logger.error("Failed to download S3 data via openEO")
+        return
+
     # Check if STAC items are provided
     if stac_items is not None:
-        logger.warning("STAC items provided for Sentinel-3, but STAC processing requires .SEN3 format and SNAP binning.")
-        logger.warning("STAC-based Sentinel-3 processing is not yet fully implemented. Falling back to CDSE download.")
+        logger.warning(
+            "STAC items provided for Sentinel-3, but STAC processing requires .SEN3 format and SNAP binning."
+        )
+        logger.warning(
+            "STAC-based Sentinel-3 processing is not yet fully implemented. Falling back to CDSE download."
+        )
         logger.warning("Please use CDSE data source for Sentinel-3 processing.")
         return
 
@@ -109,9 +157,14 @@ def binning_s3(
         s3_bands = ["FAPAR"]
     sen3_paths = list(download_dir.glob("*.SEN3"))
     date_strings = pd.to_datetime(
-        [os.path.split(sen3_path)[-1].split("____")[1][:8] for sen3_path in sen3_paths]
+        [
+            os.path.split(sen3_path)[-1].split("____")[1][:8]
+            for sen3_path in sen3_paths
+        ]
     )
-    sen3_paths = [element for _, element in sorted(zip(date_strings, sen3_paths))]
+    sen3_paths = [
+        element for _, element in sorted(zip(date_strings, sen3_paths))
+    ]
 
     for i, sen3_path in enumerate(sen3_paths):
         output_path = os.path.join(
@@ -176,7 +229,9 @@ def binning_s3(
         graph = SnapGraph()
         input_node_ids = []
         read_node_id = graph.read_op(str(sen3_path))  # read
-        input_node_ids.append(graph.reproject_op(read_node_id, crs))  # reproject
+        input_node_ids.append(
+            graph.reproject_op(read_node_id, crs)
+        )  # reproject
         binning_node_id = graph.binning_op(
             source_product_list=input_node_ids,
             aggregator_list=binning_aggregator_list,
@@ -198,7 +253,13 @@ def binning_s3(
 
 
 def produce_median_composite(
-    dir_s3, composite_dir, step=5, mosaic_days=100, s3_bands=None, D=20, sigma_doy=10
+    dir_s3,
+    composite_dir,
+    step=5,
+    mosaic_days=100,
+    s3_bands=None,
+    D=20,
+    sigma_doy=10,
 ):
     """
     Create weighted composites of Sentinel-3 images.
@@ -226,12 +287,12 @@ def produce_median_composite(
     None
     """
     sen3_paths = list(dir_s3.glob("S3*.tif"))
-    s3_dates = pd.to_datetime(
-        [
-            re.match(r".*__(\d{8})T.*\.tif", sen3_path.name).group(1)
-            for sen3_path in sen3_paths
-        ]
-    )
+    s3_dates = []
+    for sen3_path in sen3_paths:
+        match = re.match(r".*__(\d{8})T.*\.tif", sen3_path.name)
+        if match:
+            s3_dates.append(match.group(1))
+    s3_dates = pd.to_datetime(s3_dates)
     sen3_paths = np.array(
         [sen3_path for _, sen3_path in sorted(zip(s3_dates, sen3_paths))]
     )
@@ -257,7 +318,7 @@ def produce_median_composite(
 
         output_path = os.path.join(
             composite_dir,
-            f'composite_{datetime.strftime(middle_date, "%Y-%m-%d")}.tif',
+            f"composite_{datetime.strftime(middle_date, '%Y-%m-%d')}.tif",
         )
 
         s3_stack = []
@@ -290,7 +351,10 @@ def produce_median_composite(
         doy_score = np.exp(
             -1
             / 2
-            * (np.array((s3_dates[indices] - middle_date).days) ** 2 / sigma_doy**2)
+            * (
+                np.array((s3_dates[indices] - middle_date).days) ** 2
+                / sigma_doy**2
+            )
         )
         doy_score = doy_score / np.max(doy_score)
 
@@ -308,7 +372,9 @@ def produce_median_composite(
             dst.write(weighted_composite)
 
 
-def smoothing(s3_dir, smoothed_dir, product="composite", std=1, preserve_nan=True):
+def smoothing(
+    s3_dir, smoothed_dir, product="composite", std=1, preserve_nan=True
+):
     """
     Smooths Sentinel-3 images using a 2D Gaussian kernel.
 
@@ -345,7 +411,9 @@ def smoothing(s3_dir, smoothed_dir, product="composite", std=1, preserve_nan=Tru
                 s3[band], kernel, boundary="extend", preserve_nan=preserve_nan
             )
         with rasterio.open(
-            os.path.join(smoothed_dir, os.path.split(s3_path)[-1]), "w", **profile
+            os.path.join(smoothed_dir, os.path.split(s3_path)[-1]),
+            "w",
+            **profile,
         ) as dst:
             dst.write(smoothed_s3)
 
@@ -393,7 +461,9 @@ def reformat_s3(
         s3_profile.update({"count": s3_image.shape[0], "dtype": "float32"})
 
         # export image
-        export_path = os.path.join(calibrated_s3_dir, os.path.split(s3_path)[-1])
+        export_path = os.path.join(
+            calibrated_s3_dir, os.path.split(s3_path)[-1]
+        )
         with rasterio.open(export_path, "w", **s3_profile) as dst:
             dst.write(s3_image)
 
@@ -434,13 +504,31 @@ def reproject_and_crop_s3(s3_dir, s2_dir, export_dir):
             "resampling": Resampling.cubic,
         }
 
-        # Read the JRC data as client, using the master properties
+        # Read the Sentinel-3 data and reproject
         with rasterio.open(sen3_path) as client_src:
             with WarpedVRT(client_src, **vrt_options) as vrt:
                 # At this point 'vrt' is a full dataset with dimensions,
                 # CRS, and spatial extent matching 'vrt_options'.
 
+                # Read data from VRT into memory
+                data = vrt.read()
+                
+                # Create a clean output profile for GTiff (don't copy VRT profile)
+                output_profile = {
+                    'driver': 'GTiff',
+                    'dtype': vrt.profile['dtype'],
+                    'nodata': vrt.profile.get('nodata'),
+                    'width': vrt.profile['width'],
+                    'height': vrt.profile['height'],
+                    'count': vrt.profile['count'],
+                    'crs': vrt.profile['crs'],
+                    'transform': vrt.profile['transform'],
+                    'compress': 'lzw',
+                }
+                
                 # Export
                 _, name = os.path.split(sen3_path)
                 outfile = os.path.join(export_dir, name)
-                rio_shutil.copy(vrt, outfile, driver="GTiff")
+                # Write data to output file
+                with rasterio.open(outfile, "w", **output_profile) as dst:
+                    dst.write(data)

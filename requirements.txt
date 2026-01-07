@@ -9,5 +9,7 @@ scikit-learn
 setuptools
 tqdm
 pyproj
+openeo
+geopandas
 snap-graph @ git+https://github.com/DHI-GRAS/snap-graph
 creodias-finder @ git+https://github.com/DHI-GRAS/creodias-finder
