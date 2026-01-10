@@ -18,7 +18,7 @@ Hectors_Sentinel3/*
 s3_processing_vis.py
 figures/*
 s3_fusion/savitzky_golay.py
-
+test_data/*
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

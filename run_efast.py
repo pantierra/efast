@@ -63,6 +63,7 @@ logger = logging.getLogger(__name__)
 def get_credentials_from_env():
     """
     Read CDSE credentials from the environment variables CDSE_USER and CDSE_PASSWORD.
+    Also loads from .env file if present.
 
     Returns
     -------
@@ -70,6 +71,19 @@ def get_credentials_from_env():
     environment variables.
 
     """
+    # Try to load from .env file if it exists
+    env_path = Path(__file__).parent / ".env"
+    if env_path.exists():
+        with open(env_path) as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    key, value = line.split("=", 1)
+                    key = key.strip()
+                    value = value.strip().strip('"').strip("'")
+                    if key not in os.environ:
+                        os.environ[key] = value
+    
     username = os.getenv("CDSE_USER")
     password = os.getenv("CDSE_PASSWORD")
 

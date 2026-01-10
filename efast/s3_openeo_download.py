@@ -170,20 +170,27 @@ class S3OpenEODownloader:
             start_date = season_data["season_start_date"]
             end_date = season_data["season_end_date"]
 
-            # Create spatial extent (1km x 1km)
-            half_size = 0.0045  # ~1km in degrees
+            # Create spatial extent (~1km x 1km)
+            from efast.interactive_helpers import SPATIAL_EXTENT_HALF_SIZE
+            half_size = SPATIAL_EXTENT_HALF_SIZE
             spatial_extent = {
                 "west": center_lon - half_size,
                 "east": center_lon + half_size,
                 "south": center_lat - half_size,
                 "north": center_lat + half_size,
             }
+            
+            logger.info(f"📍 Spatial extent: ~1km x 1km box")
+            logger.info(f"   Bbox: [{spatial_extent['west']:.6f}, {spatial_extent['south']:.6f}, "
+                       f"{spatial_extent['east']:.6f}, {spatial_extent['north']:.6f}]")
+            logger.info(f"   Date range: {start_date} to {end_date}")
 
             # Map band names to OpenEO format
             openeo_bands = map_bands_to_openeo(bands)
-            logger.info(f"Mapped bands {bands} to OpenEO bands {openeo_bands}")
+            logger.info(f"📡 Bands: {bands} → OpenEO {openeo_bands}")
 
             # Load and process data
+            logger.info(f"🌐 Querying CDSE openEO for S3 OLCI data...")
             datacube = self.connection.load_collection(
                 collection_id=self.collection_id,
                 spatial_extent=spatial_extent,
@@ -196,12 +203,14 @@ class S3OpenEODownloader:
             output_file = output_dir / f"S3_OLCI_{site_name}_{season_year}.nc"
 
             # Download
+            logger.info(f"📥 Downloading NetCDF from openEO...")
             datacube.download(str(output_file), format="NetCDF")
-            logger.info(f"Downloaded: {output_file}")
+            logger.info(f"✅ Downloaded: {output_file}")
             
             # Convert NetCDF to individual TIFF files
+            logger.info(f"🔄 Converting NetCDF to GeoTIFFs...")
             tif_files = self.convert_netcdf_to_tiffs(output_file, output_dir, bands)
-            logger.info(f"Converted NetCDF to {len(tif_files)} TIFF files")
+            logger.info(f"✅ Converted to {len(tif_files)} GeoTIFF files (not cloud-optimized)")
             
             return str(output_file)
 
