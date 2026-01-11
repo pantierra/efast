@@ -39,6 +39,7 @@ import scipy as sp
 from dateutil import rrule
 from rasterio import shutil as rio_shutil
 from rasterio.enums import Resampling
+from rasterio.transform import from_bounds
 from rasterio.vrt import WarpedVRT
 from snap_graph.snap_graph import SnapGraph
 from tqdm import tqdm
@@ -408,8 +409,26 @@ def reproject_and_crop_s3(s3_dir, s2_dir, export_dir):
     if len(sen2_paths) == 0:
         sen2_paths = list(s2_dir.rglob("*CLOUD.tif"))
 
+    # Get profile from DIST_CLOUD (for resolution/CRS) but fix bounds from REFL
     with rasterio.open(sen2_paths[0]) as src:
-        lr_s2_profile = src.profile
+        lr_s2_profile = src.profile.copy()
+        s3_resolution = abs(src.transform[0])
+    
+    # Get correct bounds from REFL file and recalculate dimensions
+    sen2_ref_paths = list(s2_dir.glob("*REFL.tif"))
+    if len(sen2_ref_paths) == 0:
+        sen2_ref_paths = list(s2_dir.rglob("*REFL.tif"))
+    with rasterio.open(sen2_ref_paths[0]) as ref_src:
+        target_bounds = ref_src.bounds
+    
+    # Recalculate dimensions and transform with correct bounds
+    lr_s2_profile["width"] = int((target_bounds.right - target_bounds.left) / s3_resolution)
+    lr_s2_profile["height"] = int((target_bounds.top - target_bounds.bottom) / s3_resolution)
+    lr_s2_profile["transform"] = from_bounds(
+        target_bounds.left, target_bounds.bottom,
+        target_bounds.right, target_bounds.top,
+        lr_s2_profile["width"], lr_s2_profile["height"]
+    )
 
     for sen3_path in tqdm(sen3_paths, "Sentinel-3 reprojection"):
         # create a dictionary containing the desired transform, height, width, and crs.
