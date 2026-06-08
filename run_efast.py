@@ -32,14 +32,33 @@ import zipfile
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from creodias_finder import query
 from creodias_finder.download import _get_token, download
+
+from efast.cdse_query import query_products
 from dateutil import rrule
 from tqdm import tqdm
 
 import efast.efast as efast
 import efast.s2_processing as s2
 import efast.s3_processing as s3
+
+
+def load_dotenv(path=None):
+    """Load KEY=VALUE pairs from a .env file into os.environ."""
+    env_path = Path(".env") if path is None else Path(path)
+    if not env_path.is_file():
+        return
+
+    for line in env_path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        value = value.strip().strip('"').strip("'")
+        os.environ.setdefault(key.strip(), value)
+
+
+load_dotenv()
 
 
 # CDSE credentials to download Sentinel-2 and Sentinel-3 imagery
@@ -199,28 +218,31 @@ def download_from_cdse(
         credentials):
 
     # First download Sentinel-3 SYN data
-    results = query.query('Sentinel3',
-                          start_date=start_date,
-                          end_date=end_date,
-                          geometry=aoi_geometry,
-                          instrument="SYNERGY",
-                          productType="SY_2_SYN___",
-                          timeliness="NT")
-    download_list_safe([result['id'] for result in results.values()],
-                           outdir=s3_download_dir,
-                           threads=3,
-                           **credentials)
+    results = query_products(
+        "SENTINEL-3",
+        start_date,
+        end_date,
+        aoi_geometry,
+        product_type="SY_2_SYN___",
+        timeliness="NT",
+    )
+    download_list_safe(
+        [result["id"] for result in results.values()],
+        outdir=s3_download_dir,
+        threads=3,
+        **credentials,
+    )
     for zip_file in s3_download_dir.glob("*.zip"):
         with zipfile.ZipFile(zip_file, "r") as zip_ref:
             zip_ref.extractall(s3_download_dir)
 
     # Then download Sentinel-2 L2A data
-    results = query.query(
-        'Sentinel2',
-        start_date=start_date,
-        end_date=end_date,
-        geometry=aoi_geometry,
-        productType="L2A",
+    results = query_products(
+        "SENTINEL-2",
+        start_date,
+        end_date,
+        aoi_geometry,
+        product_type="S2MSI2A",
     )
     download_list_safe(
         [result['id'] for result in results.values()],

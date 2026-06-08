@@ -206,7 +206,7 @@ def distance_to_clouds(dir_s2, ratio=30, tolerance_percentage=0.05):
         s2_profile.update({"count": 1})
 
         # Save output
-        out_path = re.sub("_[A-Z]*\.tif", "_DIST_CLOUD.tif", str(sen2_path))
+        out_path = re.sub(r"_[A-Z]*\.tif", "_DIST_CLOUD.tif", str(sen2_path))
         with rasterio.open(out_path, "w", **s2_profile) as dst:
             dst.write(distance_to_cloud[np.newaxis])
 

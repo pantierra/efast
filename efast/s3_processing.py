@@ -218,7 +218,7 @@ def produce_median_composite(
     sen3_paths = list(dir_s3.glob("S3*.tif"))
     s3_dates = pd.to_datetime(
         [
-            re.match(".*__(\d{8})T.*\.tif", sen3_path.name).group(1)
+            re.match(r".*__(\d{8})T.*\.tif", sen3_path.name).group(1)
             for sen3_path in sen3_paths
         ]
     )
