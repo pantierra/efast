@@ -1,4 +1,7 @@
 astropy
+pystac-client
+openeo
+netCDF4
 ipdb
 numpy
 pandas
